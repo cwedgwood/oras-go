@@ -29,6 +29,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -3185,5 +3186,96 @@ func TestStore_TrailingBytesInMetadataFile(t *testing.T) {
 
 	if _, err := New(tempDir); err != nil {
 		t.Fatal("New() error =", err)
+	}
+}
+
+// TestStore_GC_Leftovers ensures that the temporary files of writes that were
+// interrupted are removed by GC, since nothing else removes them, and that the
+// files the store does not own are left alone.
+func TestStore_GC_Leftovers(t *testing.T) {
+	tempDir := t.TempDir()
+	s, err := New(tempDir)
+	if err != nil {
+		t.Fatal("New() error =", err)
+	}
+	ctx := context.Background()
+
+	ingestRoot := s.storage.ingestRoot
+	if err := os.MkdirAll(ingestRoot, 0777); err != nil {
+		t.Fatal("error calling MkdirAll(), error =", err)
+	}
+	leftovers := []string{
+		// an ingest file has the name that os.CreateTemp gives it, but the
+		// whole directory belongs to the package, so anything in it goes
+		filepath.Join(ingestRoot, digest.FromString("whatever").Encoded()+"_1525580788"),
+		filepath.Join(ingestRoot, "not-an-ingest-file"),
+		filepath.Join(tempDir, ocispec.ImageIndexFile+"_"+rand.Text()),
+		filepath.Join(tempDir, ocispec.ImageLayoutFile+"_"+rand.Text()),
+	}
+	// the root of the store may hold files that belong to whoever created
+	// them, which the image layout specification permits, so only the names a
+	// temporary file of this package can actually have are removed there
+	keep := []string{
+		filepath.Join(tempDir, ocispec.ImageIndexFile+"_backup"),
+		filepath.Join(tempDir, ocispec.ImageIndexFile+"_"+strings.ToLower(rand.Text())),
+		filepath.Join(tempDir, ocispec.ImageIndexFile),
+		filepath.Join(tempDir, ocispec.ImageLayoutFile),
+	}
+	for _, path := range slices.Concat(leftovers, keep[:2]) {
+		if err := os.WriteFile(path, []byte("whatever"), 0666); err != nil {
+			t.Fatal("error calling WriteFile(), error =", err)
+		}
+	}
+
+	if err := s.GC(ctx); err != nil {
+		t.Fatal("Store.GC() error =", err)
+	}
+
+	for _, path := range leftovers {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s still exists after GC(), error = %v", path, err)
+		}
+	}
+	for _, path := range keep {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("error calling Stat() on %s, error = %v", path, err)
+		}
+	}
+}
+
+func Test_removeFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	notADir := filepath.Join(tempDir, "file")
+	if err := os.WriteFile(notADir, []byte("whatever"), 0666); err != nil {
+		t.Fatal("error calling WriteFile(), error =", err)
+	}
+	subDir := filepath.Join(tempDir, "dir")
+	if err := os.Mkdir(subDir, 0777); err != nil {
+		t.Fatal("error calling Mkdir(), error =", err)
+	}
+
+	// a directory that does not exist holds no leftovers
+	if err := removeFiles(filepath.Join(tempDir, "missing"), func(string) bool { return true }); err != nil {
+		t.Error("removeFiles() error =", err)
+	}
+	// a path that is not a directory cannot be listed
+	if err := removeFiles(notADir, func(string) bool { return true }); err == nil {
+		t.Error("removeFiles() error = nil, wantErr = true")
+	}
+	// directories and unmatched files are left alone
+	if err := removeFiles(tempDir, func(name string) bool { return name == "dir" }); err != nil {
+		t.Fatal("removeFiles() error =", err)
+	}
+	for _, path := range []string{notADir, subDir} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("error calling Stat() on %s, error = %v", path, err)
+		}
+	}
+	// matched files are removed
+	if err := removeFiles(tempDir, func(name string) bool { return name == "file" }); err != nil {
+		t.Fatal("removeFiles() error =", err)
+	}
+	if _, err := os.Stat(notADir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat() error = %v, want %v", err, os.ErrNotExist)
 	}
 }
