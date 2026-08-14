@@ -3099,3 +3099,91 @@ func Test_isTempFileOf(t *testing.T) {
 		}
 	}
 }
+
+// TestStore_EmptyIndexFile ensures that a store whose index file has been
+// truncated to zero bytes, which is what an interrupted write leaves behind,
+// is usable again instead of failing for as long as the file exists.
+func TestStore_EmptyIndexFile(t *testing.T) {
+	tempDir := t.TempDir()
+	layout := []byte(`{"imageLayoutVersion":"1.0.0"}`)
+	if err := os.WriteFile(filepath.Join(tempDir, ocispec.ImageLayoutFile), layout, 0666); err != nil {
+		t.Fatal("error calling WriteFile(), error =", err)
+	}
+	indexPath := filepath.Join(tempDir, ocispec.ImageIndexFile)
+	if err := os.WriteFile(indexPath, nil, 0666); err != nil {
+		t.Fatal("error calling WriteFile(), error =", err)
+	}
+
+	s, err := New(tempDir)
+	if err != nil {
+		t.Fatal("New() error =", err)
+	}
+	if got, want := len(s.index.Manifests), 0; got != want {
+		t.Errorf("len(index.Manifests) = %v, want %v", got, want)
+	}
+
+	// the recovered index must have been written back to the file system
+	indexJSON, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal("error calling ReadFile(), error =", err)
+	}
+	var index ocispec.Index
+	if err := json.Unmarshal(indexJSON, &index); err != nil {
+		t.Fatal("error calling Unmarshal(), error =", err)
+	}
+	if got, want := index.SchemaVersion, 2; got != want {
+		t.Errorf("index.SchemaVersion = %v, want %v", got, want)
+	}
+	if got, want := index.MediaType, ocispec.MediaTypeImageIndex; got != want {
+		t.Errorf("index.MediaType = %v, want %v", got, want)
+	}
+	if got, want := len(index.Manifests), 0; got != want {
+		t.Errorf("len(index.Manifests) = %v, want %v", got, want)
+	}
+}
+
+// TestStore_EmptyLayoutFile ensures that a zero-length OCI layout file is
+// recovered in the same way as a zero-length index file.
+func TestStore_EmptyLayoutFile(t *testing.T) {
+	tempDir := t.TempDir()
+	layoutPath := filepath.Join(tempDir, ocispec.ImageLayoutFile)
+	if err := os.WriteFile(layoutPath, nil, 0666); err != nil {
+		t.Fatal("error calling WriteFile(), error =", err)
+	}
+
+	if _, err := New(tempDir); err != nil {
+		t.Fatal("New() error =", err)
+	}
+
+	layoutJSON, err := os.ReadFile(layoutPath)
+	if err != nil {
+		t.Fatal("error calling ReadFile(), error =", err)
+	}
+	var layout ocispec.ImageLayout
+	if err := json.Unmarshal(layoutJSON, &layout); err != nil {
+		t.Fatal("error calling Unmarshal(), error =", err)
+	}
+	if got, want := layout.Version, ocispec.ImageLayoutVersion; got != want {
+		t.Errorf("layout.Version = %v, want %v", got, want)
+	}
+}
+
+// TestStore_TrailingBytesInMetadataFile ensures that a metadata file holding
+// valid JSON followed by anything else is still accepted, as it was before the
+// files were read for their length.
+func TestStore_TrailingBytesInMetadataFile(t *testing.T) {
+	tempDir := t.TempDir()
+	files := map[string][]byte{
+		ocispec.ImageLayoutFile: []byte(`{"imageLayoutVersion":"1.0.0"}` + "trailing"),
+		ocispec.ImageIndexFile:  []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}` + "trailing"),
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(tempDir, name), content, 0666); err != nil {
+			t.Fatal("error calling WriteFile(), error =", err)
+		}
+	}
+
+	if _, err := New(tempDir); err != nil {
+		t.Fatal("New() error =", err)
+	}
+}

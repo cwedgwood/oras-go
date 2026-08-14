@@ -103,3 +103,32 @@ func TestStore_MetadataFilePermission(t *testing.T) {
 		})
 	}
 }
+
+// TestStore_MetadataFilePermission_Unwritable ensures that the permission of a
+// metadata file that the caller cannot write is preserved rather than relaxed.
+// A mode of zero is a legitimate permission, not the absence of a file.
+func TestStore_MetadataFilePermission_Unwritable(t *testing.T) {
+	for _, perm := range []os.FileMode{0000, 0444} {
+		t.Run(perm.String(), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ocispec.ImageIndexFile)
+			if err := os.WriteFile(path, []byte("{}"), 0666); err != nil {
+				t.Fatal("error calling WriteFile(), error =", err)
+			}
+			if err := os.Chmod(path, perm); err != nil {
+				t.Fatal("error calling Chmod(), error =", err)
+			}
+
+			if err := writeFileAtomic(path, []byte(`{"replaced":true}`)); err != nil {
+				t.Fatal("writeFileAtomic() error =", err)
+			}
+
+			fi, err := os.Stat(path)
+			if err != nil {
+				t.Fatal("error calling Stat(), error =", err)
+			}
+			if got := fi.Mode().Perm(); got != perm {
+				t.Errorf("mode = %v, want %v", got, perm)
+			}
+		})
+	}
+}
