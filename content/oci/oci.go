@@ -370,7 +370,7 @@ func (s *Store) ensureOCILayoutFile() error {
 		if err != nil {
 			return fmt.Errorf("failed to marshal OCI layout file: %w", err)
 		}
-		return os.WriteFile(layoutFilePath, layoutJSON, 0666)
+		return writeFileAtomic(layoutFilePath, layoutJSON)
 	}
 	defer layoutFile.Close()
 
@@ -463,7 +463,7 @@ func (s *Store) writeIndexFile() error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal index file: %w", err)
 	}
-	return os.WriteFile(s.indexPath, indexJSON, 0666)
+	return writeFileAtomic(s.indexPath, indexJSON)
 }
 
 // GC removes garbage from Store. Unsaved index will be lost. To prevent unexpected
