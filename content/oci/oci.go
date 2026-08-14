@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path"
@@ -530,6 +531,7 @@ func (s *Store) writeIndexFile() error {
 // The garbage to be cleaned are:
 //   - unreferenced (dangling) blobs in Store which have no predecessors
 //   - garbage blobs in the storage whose metadata is not stored in Store
+//   - temporary files left behind by interrupted blob and metadata writes
 func (s *Store) GC(ctx context.Context) error {
 	s.sync.Lock()
 	defer s.sync.Unlock()
@@ -578,6 +580,50 @@ func (s *Store) GC(ctx context.Context) error {
 					return err
 				}
 			}
+		}
+	}
+
+	// clean up the temporary files left behind by interrupted writes
+	if err := s.gcLeftovers(); err != nil {
+		return fmt.Errorf("unable to remove leftover temporary files: %w", err)
+	}
+	return nil
+}
+
+// gcLeftovers removes the temporary files that interrupted writes leave
+// behind: the ingest files of blob writes that did not complete, and the
+// temporary files of metadata writes that were never renamed into place.
+// Nothing else refers to them, and no other code path removes them.
+func (s *Store) gcLeftovers() error {
+	// every file in the ingest directory is the residue of a blob write.
+	if err := removeFiles(s.storage.ingestRoot, func(string) bool { return true }); err != nil {
+		return err
+	}
+	// the temporary files of metadata writes are created next to the file that
+	// they replace, in the root of the store.
+	return removeFiles(s.root, func(name string) bool {
+		return isTempFileOf(name, ocispec.ImageIndexFile) || isTempFileOf(name, ocispec.ImageLayoutFile)
+	})
+}
+
+// removeFiles removes the files in dir whose names are matched by match.
+// Directories and entries that are not matched are left alone, and a directory
+// that does not exist is not an error.
+func removeFiles(dir string, match func(name string) bool) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !match(entry.Name()) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
 		}
 	}
 	return nil
